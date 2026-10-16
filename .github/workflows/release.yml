@@ -1,0 +1,64 @@
+# Builds Shoter for Windows and attaches it to a GitHub release.
+# Run it by pushing a tag: `git tag -a v0.1.0 -m "What changed" && git push origin v0.1.0`.
+# Every other push and pull request only runs the tests (no optimized build).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths-ignore: ["site/**", "**.md"]
+  pull_request:
+    paths-ignore: ["site/**", "**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A newer push to the same branch cancels the run that is still going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check
+      # GPUI's shader build needs fxc.exe and the icon needs rc.exe: use the runner's newest SDK.
+      - shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - run: cargo test --locked
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - run: cargo build --locked --release
+      - shell: pwsh
+        run: Compress-Archive -Path target/release/shoter.exe -DestinationPath shoter-windows-x64.zip
+      # The release notes are the tag's message: `git tag -a v0.1.1 -m "What changed"`.
+      - shell: pwsh
+        run: |
+          git fetch --force origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}"
+          git tag -l --format='%(contents)' "${{ github.ref_name }}" > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: shoter-windows-x64.zip
+          body_path: notes.md
